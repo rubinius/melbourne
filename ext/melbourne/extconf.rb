@@ -5,10 +5,10 @@ def add_lib(name)
   $libs << " #{lib}/lib#{name}.a "
 end
 
-add_lib("mquark")
-add_lib("bstring")
-add_lib("ptr_array")
-add_lib("cchash")
+# add_lib("mquark")
+# add_lib("bstring")
+# add_lib("ptr_array")
+# add_lib("cchash")
 
 #have_library("bstring")
 #have_library("mquark")
