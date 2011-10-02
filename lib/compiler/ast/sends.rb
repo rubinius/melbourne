@@ -409,7 +409,7 @@ module Rubinius
     end
 
     class Iter < Node
-      include Compiler::LocalVariables
+      # include Compiler::LocalVariables
 
       attr_accessor :parent, :arguments, :body
 

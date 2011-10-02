@@ -1,3 +1,5 @@
+require "compiler/ast"
+
 module Rubinius
   class Melbourne
     def process_parse_error(message, column, line, source)

@@ -102,7 +102,7 @@ module Rubinius
     end
 
     class ClosedScope < Node
-      include Compiler::LocalVariables
+      # include Compiler::LocalVariables
 
       attr_accessor :body
 
