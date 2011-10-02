@@ -65,7 +65,7 @@ VALUE melbourne19_file_to_ast(VALUE self, VALUE fname, VALUE start) {
   }
 }
 
-void Init_melbourne20(void) {
+void Init_melbourne(void) {
   VALUE rb_cMelbourne;
 
   melbourne::init_symbols20();

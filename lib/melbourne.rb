@@ -1,5 +1,8 @@
-require Rubinius::PARSER_EXT_PATH
-require Rubinius::PARSER_PATH + "/processor"
+module Rubinius
+end
+
+require "melbourne.so"
+require "melbourne/processor"
 
 class String
   def to_ast(name="(eval)", line=1)
