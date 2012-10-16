@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     module Transforms
@@ -37,11 +39,6 @@ module Rubinius
           new line, receiver, name, privately
         end
       end
-
-      def bytecode(g)
-        pos(g)
-        g.push_has_block
-      end
     end
 
     class AccessUndefined < Send
@@ -51,11 +48,6 @@ module Rubinius
         if privately and name == :undefined
           new line, receiver, name, privately
         end
-      end
-
-      def bytecode(g)
-        pos(g)
-        g.push_undef
       end
     end
 
@@ -67,10 +59,6 @@ module Rubinius
       def self.match?(line, receiver, name, arguments, privately)
         match_send? receiver, :Rubinius, name, :primitive
       end
-
-      def bytecode(g)
-        g.send_primitive @arguments.array.first.value
-      end
     end
 
     ##
@@ -80,17 +68,6 @@ module Rubinius
 
       def self.match?(line, receiver, name, arguments, privately)
         match_send? receiver, :Rubinius, name, :check_frozen
-      end
-
-      def bytecode(g)
-        pos(g)
-        if @arguments.array.size == 0
-          g.push_self
-          g.check_frozen
-        else
-          @arguments.array.first.bytecode(g)
-          g.check_frozen
-        end
       end
     end
 
@@ -103,19 +80,6 @@ module Rubinius
       def self.match?(line, receiver, name, arguments, privately)
         match_send? receiver, :Rubinius, name, :invoke_primitive
       end
-
-      def bytecode(g)
-        if @arguments.splat?
-          raise CompileError, "splat argument passed to invoke_primitive"
-        elsif @block
-          raise CompileError, "block passed to invoke_primitive"
-        end
-
-        pos(g)
-        selector = @arguments.array.shift
-        @arguments.bytecode(g)
-        g.invoke_primitive selector.value, @arguments.size
-      end
     end
 
     ##
@@ -126,22 +90,6 @@ module Rubinius
 
       def self.match?(line, receiver, name, arguments, privately)
         match_send? receiver, :Rubinius, name, :call_custom
-      end
-
-      def bytecode(g)
-        if @arguments.splat?
-          raise CompileError, "splat argument passed to call_custom"
-        elsif @block
-          raise CompileError, "block passed to call_custom"
-        end
-
-        pos(g)
-        rec = @arguments.array.shift
-        rec.bytecode(g)
-
-        selector = @arguments.array.shift
-        @arguments.bytecode(g)
-        g.call_custom selector.value, @arguments.size
       end
     end
 
@@ -177,17 +125,6 @@ module Rubinius
       def self.match?(line, receiver, name, arguments, privately)
         match_send? receiver, :Rubinius, name, :single_block_arg
       end
-
-      def bytecode(g)
-        if @arguments.splat?
-          raise CompileError, "splat argument passed to single_block_arg"
-        elsif @block
-          raise CompileError, "block passed to single_block_arg"
-        end
-
-        pos(g)
-        g.cast_for_single_block_arg
-      end
     end
 
     ##
@@ -198,11 +135,6 @@ module Rubinius
 
       def self.match?(line, receiver, name, arguments, privately)
         match_send? receiver, :Rubinius, name, :asm
-      end
-
-      def bytecode(g)
-        e = Evaluator.new g, @block.arguments.names, @arguments.array
-        e.execute @block.body
       end
     end
 
@@ -232,13 +164,6 @@ module Rubinius
           result
         end
       end
-
-      def bytecode(g)
-        map_sends
-
-        pos(g)
-        @block.bytecode(g)
-      end
     end
 
     ##
@@ -266,15 +191,6 @@ module Rubinius
       end
 
       attr_accessor :operator
-
-      def bytecode(g)
-        pos(g)
-
-        @receiver.bytecode(g)
-        @arguments.bytecode(g)
-
-        g.__send__ @operator, g.find_literal(@name)
-      end
     end
 
     ##
@@ -283,48 +199,13 @@ module Rubinius
     class SendFastNew < SendWithArguments
       transform :default, :fast_new, "Fast SomeClass.new path"
 
-      # FIXME duplicated from kernel/common/compiled_method.rb
+      # FIXME duplicated from kernel/common/compiled_code.rb
       KernelMethodSerial = 47
 
       def self.match?(line, receiver, name, arguments, privately)
         # ignore vcall style
         return false if !arguments and privately
         name == :new
-      end
-
-      def bytecode(g)
-        return super(g) if @block or @arguments.splat?
-
-        pos(g)
-
-        slow = g.new_label
-        done = g.new_label
-
-        @receiver.bytecode(g)
-        g.dup
-
-        if @privately
-          g.check_serial_private :new, KernelMethodSerial
-        else
-          g.check_serial :new, KernelMethodSerial
-        end
-        g.gif slow
-
-        # fast path
-        g.send :allocate, 0, true
-        g.dup
-        @arguments.bytecode(g)
-        g.send :initialize, @arguments.size, true
-        g.pop
-
-        g.goto done
-
-        # slow path
-        slow.set!
-        @arguments.bytecode(g)
-        g.send :new, @arguments.size, @privately
-
-        done.set!
       end
     end
 
@@ -352,14 +233,6 @@ module Rubinius
           new line, receiver, rename, arguments, privately
         end
       end
-
-      def bytecode(g)
-        pos(g)
-        @receiver.bytecode(g)
-        @arguments.bytecode(g)
-
-        g.send @name, @arguments.size, @privately
-      end
     end
 
     ##
@@ -386,48 +259,18 @@ module Rubinius
           new line, receiver, rename, arguments, privately
         end
       end
-
-      def bytecode(g)
-        pos(g)
-        @arguments.bytecode(g)
-        @receiver.bytecode(g)
-
-        g.__send__ @name
-      end
     end
 
     ##
     # Speeds up certain forms of Type.coerce_to
     #
     class SendFastCoerceTo < SendWithArguments
-      transform :default, :fast_coerce, "Fast Type.coerce_to path"
+      transform :default, :fast_coerce, "Fast Rubinius::Type.coerce_to path"
 
       def self.match?(line, receiver, name, arguments, privately)
-        match_send?(receiver, :Type, name, :coerce_to) and
+        methods = [:coerce_to, :check_convert_type, :try_convert]
+        receiver.kind_of?(TypeConstant) && methods.include?(name) &&
           arguments.body.size == 3
-      end
-
-      def bytecode(g)
-        pos(g)
-        var = @arguments.array[0]
-        const = @arguments.array[1]
-
-        if var.kind_of? LocalVariableAccess and
-           const.kind_of? ConstantAccess and const.name == :Fixnum
-          done = g.new_label
-
-          var.bytecode(g)
-          g.dup
-          g.send :__fixnum__, 0
-          g.git done
-
-          g.pop # remove the dup
-          super(g)
-
-          done.set!
-        else
-          super(g)
-        end
       end
     end
 
@@ -448,33 +291,6 @@ module Rubinius
           @blockarg = iter
         else
           @block = iter.body
-        end
-      end
-
-      def bytecode(g)
-        pos(g)
-        if @block
-          g.push_modifiers
-
-          g.break = g.new_label
-          g.next = g.redo = top = g.new_label
-          top.set!
-
-          @block.bytecode(g)
-          g.pop
-
-          g.check_interrupts
-          g.goto top
-
-          g.break.set!
-          g.pop_modifiers
-        elsif @blockarg
-          g.push :self
-          @blockarg.bytecode(g)
-          g.send_with_block :loop, 0, true
-        else
-          g.push :self
-          g.send :loop, 0, true
         end
       end
     end

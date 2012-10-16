@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class Case < Node
@@ -7,23 +9,6 @@ module Rubinius
         @line = line
         @whens = whens
         @else = else_body || NilLiteral.new(line)
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        done = g.new_label
-
-        @whens.each do |w|
-          w.bytecode(g, done)
-        end
-
-        @else.bytecode(g)
-
-        # See command in if about why using line 0
-        g.set_line 0
-
-        done.set!
       end
 
       def receiver_sexp
@@ -47,26 +32,6 @@ module Rubinius
         @receiver = receiver
         @whens = whens
         @else = else_body || NilLiteral.new(line)
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        done = g.new_label
-
-        @receiver.bytecode(g)
-
-        @whens.each do |w|
-          w.receiver_bytecode(g, done)
-        end
-
-        g.pop
-        @else.bytecode(g)
-
-        # See command in if about why using line 0
-        g.set_line 0
-
-        done.set!
       end
 
       def receiver_sexp
@@ -113,71 +78,6 @@ module Rubinius
         end
       end
 
-      def condition_bytecode(g, condition)
-        condition.pos(g)
-        g.dup
-        condition.bytecode(g)
-        g.swap
-        g.send :===, 1
-      end
-
-      def receiver_bytecode(g, done)
-        body = g.new_label
-        nxt = g.new_label
-
-        if @single
-          condition_bytecode(g, @single)
-          g.gif nxt
-        else
-          if @conditions
-            @conditions.body.each do |c|
-              condition_bytecode(g, c)
-              g.git body
-            end
-          end
-
-          @splat.receiver_bytecode(g, body, nxt) if @splat
-          g.goto nxt
-
-          body.set!
-        end
-
-        g.pop
-        @body.bytecode(g)
-        g.goto done
-
-        nxt.set!
-      end
-
-      def bytecode(g, done)
-        pos(g)
-
-        nxt = g.new_label
-        body = g.new_label
-
-        if @single
-          @single.bytecode(g)
-          g.gif nxt
-        else
-          if @conditions
-            @conditions.body.each do |condition|
-              condition.bytecode(g)
-              g.git body
-            end
-          end
-
-          @splat.bytecode(g, body, nxt) if @splat
-          g.goto nxt
-
-          body.set!
-        end
-
-        @body.bytecode(g)
-        g.goto done
-
-        nxt.set!
-      end
-
       def to_sexp
         if @single
           conditions_sexp = [:array, @single.to_sexp]
@@ -197,21 +97,6 @@ module Rubinius
         @condition = condition
       end
 
-      def receiver_bytecode(g, body, nxt)
-        pos(g)
-
-        g.dup
-        @condition.bytecode(g)
-        g.cast_array
-        g.swap
-        g.send :__matches_when__, 1
-        g.git body
-      end
-
-      def bytecode(g, body, nxt)
-        # TODO: why is this empty?
-      end
-
       def to_sexp
         [:when, @condition.to_sexp, nil]
       end
@@ -224,28 +109,26 @@ module Rubinius
         @finish = finish
       end
 
-      def bytecode(g)
-        g.push :nil
+      def sexp_name
+        :flip2
+      end
+
+      def exclusive?
+        false
       end
 
       def to_sexp
-        [:flip2, @start.to_sexp, @finish.to_sexp]
+        [sexp_name, @start.to_sexp, @finish.to_sexp]
       end
     end
 
-    class Flip3 < Node
-      def initialize(line, start, finish)
-        @line = line
-        @start = start
-        @finish = finish
+    class Flip3 < Flip2
+      def sexp_name
+        :flip3
       end
 
-      def bytecode(g)
-        g.push :nil
-      end
-
-      def to_sexp
-        [:flip3, @start.to_sexp, @finish.to_sexp]
+      def exclusive?
+        true
       end
     end
 
@@ -257,28 +140,6 @@ module Rubinius
         @condition = condition
         @body = body || NilLiteral.new(line)
         @else = else_body || NilLiteral.new(line)
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        done = g.new_label
-        else_label = g.new_label
-
-        @condition.bytecode(g)
-        g.gif else_label
-
-        @body.bytecode(g)
-        g.goto done
-
-        else_label.set!
-        @else.bytecode(g)
-
-        # Use line 0 to indicate "compiler generated code"
-        # so that debuggers and such don't get confused by
-        # thinking the then branch jumps into the else branch.
-        g.set_line 0
-        done.set!
       end
 
       def to_sexp
@@ -297,67 +158,6 @@ module Rubinius
         @check_first = check_first
       end
 
-      def condition_bytecode(g, bottom, use_gif)
-        @condition.bytecode(g)
-        if use_gif
-          g.gif bottom
-        else
-          g.git bottom
-        end
-      end
-
-      def body_bytecode(g, lbl)
-        g.state.push_loop
-        @body.bytecode(g)
-        g.state.pop_loop
-
-        # This is a loop epilogue. Nothing that changes
-        # computation should be put here.
-        lbl.set!
-        g.pop
-        g.check_interrupts
-      end
-
-      def bytecode(g, use_gif=true)
-        pos(g)
-
-        g.push_modifiers
-
-        top = g.new_label
-        post = g.next = g.new_label
-        bottom = g.new_label
-
-        g.break = g.new_label
-
-        if @check_first
-          g.redo = g.new_label
-
-          top.set!
-          condition_bytecode(g, bottom, use_gif)
-
-          g.redo.set!
-          body_bytecode(g, post)
-        else
-          g.redo = top
-
-          top.set!
-          body_bytecode(g, post)
-
-          condition_bytecode(g, bottom, use_gif)
-        end
-
-        g.goto top
-
-        # See other set_line(0) comments
-        g.set_line 0
-
-        bottom.set!
-        g.push :nil
-        g.break.set!
-
-        g.pop_modifiers
-      end
-
       def sexp_name
         :while
       end
@@ -368,10 +168,6 @@ module Rubinius
     end
 
     class Until < While
-      def bytecode(g)
-        super(g, false)
-      end
-
       def sexp_name
         :until
       end
@@ -383,19 +179,6 @@ module Rubinius
       def initialize(line, pattern, flags)
         @line = line
         @pattern = RegexLiteral.new line, pattern, flags
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        g.push_rubinius
-        g.find_const :Globals
-        g.push_literal :$_
-        g.send :[], 1
-
-        @pattern.bytecode(g)
-
-        g.send :=~, 1
       end
 
       def to_sexp
@@ -412,14 +195,6 @@ module Rubinius
         @value = value
       end
 
-      def bytecode(g)
-        pos(g)
-
-        @pattern.bytecode(g)
-        @value.bytecode(g)
-        g.send :=~, 1
-      end
-
       def to_sexp
         [:match2, @pattern.to_sexp, @value.to_sexp]
       end
@@ -432,14 +207,6 @@ module Rubinius
         @line = line
         @pattern = pattern
         @value = value
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        @value.bytecode(g)
-        @pattern.bytecode(g)
-        g.send :=~, 1
       end
 
       def to_sexp
@@ -461,21 +228,6 @@ module Rubinius
         g.send :jump_error, 1
       end
 
-      def bytecode(g)
-        pos(g)
-
-        @value.bytecode(g)
-
-        if g.break
-          g.goto g.break
-        elsif g.state.block?
-          g.raise_break
-        else
-          g.pop
-          jump_error g, :break
-        end
-      end
-
       def sexp_name
         :break
       end
@@ -493,37 +245,6 @@ module Rubinius
         @value = value
       end
 
-      def bytecode(g)
-        pos(g)
-
-        # From "The Ruby Programming Lanuage"
-        #  "When next is used in a loop, any values following the next
-        #   are ignored"
-        #
-        # By ignored, it must mean evaluated and the value of the expression
-        # is thrown away, because 1.8 evaluates them even though it doesn't
-        # use them.
-        if @value
-          @value.bytecode(g)
-        else
-          g.push :nil
-        end
-
-        if g.state.loop?
-          g.goto g.next
-        elsif g.state.block?
-          if g.next
-            g.goto g.next
-          else
-            g.ret
-          end
-        else
-          g.pop
-
-          jump_error g, :next
-        end
-      end
-
       def sexp_name
         :next
       end
@@ -534,16 +255,6 @@ module Rubinius
         @line = line
       end
 
-      def bytecode(g)
-        pos(g)
-
-        if g.redo
-          g.goto g.redo
-        else
-          jump_error g, :redo
-        end
-      end
-
       def to_sexp
         [:redo]
       end
@@ -552,16 +263,6 @@ module Rubinius
     class Retry < Break
       def initialize(line)
         @line = line
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        if g.retry
-          g.goto g.retry
-        else
-          jump_error g, :retry
-        end
       end
 
       def to_sexp
@@ -576,35 +277,6 @@ module Rubinius
         @line = line
         @value = expr
         @splat = nil
-      end
-
-      def bytecode(g, force=false)
-        pos(g)
-
-        # Literal ArrayList and a splat
-        if @splat
-          splat_node = @value.body.pop
-          @value.bytecode(g)
-          splat_node.call_bytecode(g)
-          g.send :+, 1
-        elsif @value
-          @value.bytecode(g)
-        else
-          g.push :nil
-        end
-
-        if lcl = g.state.rescue?
-          g.push_stack_local lcl
-          g.restore_exception_state
-        end
-
-        if g.state.block?
-          g.raise_return
-        elsif !force and g.state.ensure?
-          g.ensure_return
-        else
-          g.ret
-        end
       end
 
       def to_sexp

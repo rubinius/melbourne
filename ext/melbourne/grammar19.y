@@ -15,19 +15,7 @@
 #define YYDEBUG 1
 #define YYERROR_VERBOSE 1
 
-#include <stdio.h>
-#include <errno.h>
-#include <ctype.h>
-#include <string.h>
-#include <stdbool.h>
-#include <stdint.h>
-#include <assert.h>
-#include <stdlib.h>
-#include <unistd.h>
-#include <sys/types.h>
-
-#include "ruby.h"
-
+#include "melbourne.hpp"
 #include "grammar19.hpp"
 #include "parser_state19.hpp"
 #include "visitor19.hpp"
@@ -110,6 +98,7 @@ static NODE *list_concat(NODE*,NODE*);
 static NODE *parser_arg_append(rb_parser_state*, NODE*, NODE*);
 static NODE *parser_arg_concat(rb_parser_state*, NODE*, NODE*);
 static NODE *parser_literal_concat(rb_parser_state*, NODE*, NODE*);
+static int parser_literal_concat0(rb_parser_state*, VALUE, VALUE);
 static NODE *parser_new_evstr(rb_parser_state*, NODE*);
 static NODE *parser_evstr2dstr(rb_parser_state*, NODE*);
 static NODE *parser_call_bin_op(rb_parser_state*, NODE*, ID, NODE*);
@@ -186,6 +175,8 @@ rb_parser_state *parser_alloc_state() {
 
   processor = 0;
   references = rb_ary_new();
+
+  parser_state->enc = parser_usascii_encoding();
 
   return parser_state;
 }
@@ -281,7 +272,6 @@ void pop_start_line(rb_parser_state* parser_state) {
 
 #define POP_LINE() pop_start_line((rb_parser_state*)parser_state)
 
-static ID rb_parser_sym(const char *name);
 static ID rb_id_attrset(ID);
 
 static int scan_oct(const char *start, size_t len, size_t *retlen);
@@ -318,6 +308,7 @@ static int scan_hex(const char *start, size_t len, size_t *retlen);
 #define new_yield(n)              parser_new_yield(parser_state, n)
 #define evstr2dstr(n)             parser_evstr2dstr(parser_state, n)
 #define literal_concat(a, b)      parser_literal_concat(parser_state, a, b)
+#define literal_concat0(a, b)     parser_literal_concat0(parser_state, a, b)
 #define new_evstr(n)              parser_new_evstr(parser_state, n)
 
 #define value_expr(n)             parser_value_expr(parser_state, n)
@@ -358,8 +349,13 @@ static int scan_hex(const char *start, size_t len, size_t *retlen);
 #define RE_OPTION_MULTILINE          (4)
 #endif
 
+/* Must match up with options/kcode definitions in regexp.rb and regexp.cpp */
 #define RE_OPTION_DONT_CAPTURE_GROUP (128)
 #define RE_OPTION_CAPTURE_GROUP      (256)
+#define RE_KCODE_NONE                (1 << 9)
+#define RE_KCODE_EUC                 (2 << 9)
+#define RE_KCODE_SJIS                (3 << 9)
+#define RE_KCODE_UTF8                (4 << 9)
 #define RE_OPTION_ONCE               (8192)
 
 #define NODE_STRTERM NODE_ZARRAY        /* nothing to gc */
@@ -375,10 +371,12 @@ static int scan_hex(const char *start, size_t len, size_t *retlen);
 #define nd_nest u3.cnt
 
 #define UTF8_ENC()            (parser_state->utf8 ? parser_state->utf8 : \
-                                (parser_state->utf8 = rb_utf8_encoding()))
-#define STR_NEW(p,n)          rb_enc_str_new((p), (n), parser_state->enc)
-#define STR_NEW0()            rb_enc_str_new(0, 0, parser_state->enc)
-#define STR_NEW3(p,n,e,func)  parser_str_new((p), (n), (e), (func), parser_state->enc)
+                                (parser_state->utf8 = parser_utf8_encoding()))
+#define STR_NEW(p,n)          parser_enc_str_new((p), (n), parser_state->enc)
+#define STR_NEW0()            parser_enc_str_new(0, 0, parser_state->enc)
+#define STR_NEW2(p)           parser_enc_str_new((p), strlen(p), parser_state->enc)
+#define STR_NEW3(p,n,e,func)  parser_str_new(parser_state, (p), (n), (e), \
+                                            (func), parser_state->enc)
 #define ENC_SINGLE(cr)        ((cr)==ENC_CODERANGE_7BIT)
 #define TOK_INTERN(mb)        parser_intern3(tok(), toklen(), parser_state->enc)
 
@@ -605,10 +603,7 @@ top_stmt        : stmt
                   }
                   '{' top_compstmt '}'
                   {
-                    /* TODO
-                    block_append( , $4);
-                    */
-                    $$ = NEW_BEGIN(0);
+                    $$ = NEW_PREEXE($4);
                   }
                 ;
 
@@ -895,7 +890,7 @@ cmd_brace_block : tLBRACE_ARG
                   {
                     $$ = NEW_ITER($3, $4);
                     nd_set_line($$, $<num>2);
-                    bv_pop($<vars>2);
+                    bv_pop($<vars>1);
                   }
                 ;
 
@@ -1558,7 +1553,7 @@ call_args       : command
                   }
                 | args ',' assocs opt_block_arg
                   {
-                    $$ = list_append($1, NEW_HASH($3));
+                    $$ = arg_append($1, NEW_HASH($3));
                     $$ = arg_blk_pass($$, $4);
                   }
                 | block_arg
@@ -1608,7 +1603,7 @@ args            : arg_value
                   {
                     NODE *n1;
                     if((n1 = splat_array($1)) != 0) {
-                      $$ = list_append($1, $3);
+                      $$ = list_append(n1, $3);
                     } else {
                       $$ = arg_append($1, $3);
                     }
@@ -1628,7 +1623,7 @@ mrhs            : args ',' arg_value
                   {
                     NODE *n1;
                     if((n1 = splat_array($1)) != 0) {
-                      $$ = list_append($1, $3);
+                      $$ = list_append(n1, $3);
                     } else {
                       $$ = arg_append($1, $3);
                     }
@@ -2461,9 +2456,10 @@ xstring         : tXSTRING_BEG xstring_contents tSTRING_END
 
 regexp          : tREGEXP_BEG regexp_contents tREGEXP_END
                   {
-                    // TODO
                     intptr_t options = $3;
                     NODE *node = $2;
+                    NODE *list, *prev;
+
                     if(!node) {
                       node = NEW_REGEX(STR_NEW0(), options & ~RE_OPTION_ONCE);
                     } else {
@@ -2483,6 +2479,34 @@ regexp          : tREGEXP_BEG regexp_contents tREGEXP_END
                           nd_set_type(node, NODE_DREGX);
                         }
                         node->nd_cflag = options & ~RE_OPTION_ONCE;
+                        for(list = (prev = node)->nd_next; list; list = list->nd_next) {
+                          if(nd_type(list->nd_head) == NODE_STR) {
+                            VALUE tail = list->nd_head->nd_lit;
+                            if(prev && !NIL_P(prev->nd_lit)) {
+                              VALUE lit;
+                              if(prev == node) {
+                                lit = prev->nd_lit;
+                              } else {
+                                lit = prev->nd_head->nd_lit;
+                              }
+                              if(!literal_concat0(lit, tail)) {
+                                node = 0;
+                                break;
+                              }
+                              rb_str_resize(tail, 0);
+                              prev->nd_next = list->nd_next;
+                              list = prev;
+                            } else {
+                              prev = list;
+                            }
+                          } else {
+                            prev = 0;
+                          }
+                        }
+                        if(!node->nd_next) {
+                          nd_set_type(node, NODE_REGEX);
+                          node->nd_cnt = options & ~RE_OPTION_ONCE;
+                        }
                         break;
                       }
                     }
@@ -2927,7 +2951,7 @@ f_block_arg     : blkarg_mark tIDENTIFIER
                   {
                     if(!is_local_id($2))
                       yy_error("block argument must be local variable");
-                    else if(local_id($2))
+                    else if(!in_block() && local_id($2))
                       yy_error("duplicate block argument name");
                     arg_var(shadowing_lvar(get_id($2)));
                     $$ = $2;
@@ -3101,9 +3125,9 @@ static int parser_here_document(rb_parser_state*, NODE*);
 #endif
 
 #define parser_encoding_name()    (parser_state->enc->name)
-#define parser_mbclen()           rb_enc_mbclen((lex_p-1),lex_pend,parser->enc)
-#define parser_precise_mbclen()   rb_enc_precise_mbclen((lex_p-1),lex_pend,parser_state->enc)
-#define is_identchar(p,e,enc)     (rb_enc_isalnum(*p,enc) || (*p) == '_' || !ISASCII(*p))
+#define parser_mbclen()           parser_enc_mbclen((lex_p-1),lex_pend,parser->enc)
+#define parser_precise_mbclen()   parser_enc_precise_mbclen((lex_p-1),lex_pend,parser_state->enc)
+#define is_identchar(p,e,enc)     (parser_enc_isalnum(*p,enc) || (*p) == '_' || !ISASCII(*p))
 #define parser_is_identchar()     (!eofp && \
                                    is_identchar((lex_p-1),lex_pend,parser_state->enc))
 
@@ -3153,8 +3177,8 @@ yycompile(rb_parser_state* parser_state, char *f, int line)
 static rb_encoding*
 must_be_ascii_compatible(VALUE s)
 {
-  rb_encoding *enc = rb_enc_get(s);
-  if(!rb_enc_asciicompat(enc)) {
+  rb_encoding *enc = parser_enc_get(s);
+  if(!parser_enc_asciicompat(enc)) {
     // TODO: handle this in a way that doesn't leak parser state
     // rb_raise(rb_eArgError, "invalid source encoding");
   }
@@ -3178,7 +3202,7 @@ lex_get_str(rb_parser_state* parser_state, VALUE s)
     if(*end++ == '\n') break;
   }
   lex_gets_ptr = end - RSTRING_PTR(s);
-  return REF(rb_enc_str_new(beg, end - beg, enc));
+  return REF(parser_enc_str_new(beg, end - beg, enc));
 }
 
 static VALUE
@@ -3196,7 +3220,6 @@ VALUE process_parse_tree(rb_parser_state*, VALUE, NODE*, ID*);
 VALUE
 string_to_ast(VALUE ptp, VALUE name, VALUE source, VALUE line)
 {
-  int n;
   int l = FIX2INT(line);
   VALUE ret;
   rb_parser_state* parser_state = parser_alloc_state();
@@ -3209,7 +3232,7 @@ string_to_ast(VALUE ptp, VALUE name, VALUE source, VALUE line)
   ruby_sourceline = l - 1;
   compile_for_eval = 1;
 
-  n = yycompile(parser_state, RSTRING_PTR(name), l);
+  yycompile(parser_state, RSTRING_PTR(name), l);
 
   if(!parse_error) {
     ret = process_parse_tree(parser_state, ptp, top_node, NULL);
@@ -3221,47 +3244,51 @@ string_to_ast(VALUE ptp, VALUE name, VALUE source, VALUE line)
   return ret;
 }
 
-#define LEX_IO_BUFLEN  1024
+#define LEX_IO_BUFLEN  5120
 
 static VALUE parse_io_gets(rb_parser_state* parser_state, VALUE s) {
   VALUE str = Qnil;
+  char* p;
+  ssize_t n;
 
   while(true) {
-    if(lex_io_total == 0) {
+    if(lex_io_total == 0 || lex_io_index == lex_io_total) {
       lex_io_total = read(lex_io, lex_io_buf, LEX_IO_BUFLEN);
 
-      if(lex_io_total < 1) {
+      if(lex_io_total == 0) {
         lex_io_total = 0;
+        return str;
+      } else if(lex_io_total < 0) {
+        // TODO raise exception
         return str;
       } else {
         lex_io_index = 0;
       }
     }
 
-    // TODO: encoding aware.
-    for(ssize_t i = lex_io_index; i < lex_io_total; i++) {
-      if(lex_io_buf[i] == '\n') {
-        ssize_t len = i - lex_io_index + 1;
-
-        if(str == Qnil) {
-          str = REF(rb_str_new(lex_io_buf + lex_io_index, len));
-        } else {
-          rb_str_cat(str, lex_io_buf + lex_io_index, len);
-        }
-
-        lex_io_count += len;
-        if(i == lex_io_total - 1) {
-          lex_io_total = 0;
-        } else {
-          lex_io_index = i + 1;
-        }
-
-        return str;
-      }
+    p = (char*)memchr(lex_io_buf + lex_io_index,
+                      '\n', lex_io_total - lex_io_index);
+    if(p) {
+      n = p - lex_io_buf - lex_io_index + 1;
+    } else {
+      n = lex_io_total - lex_io_index;
     }
 
-    str = REF(rb_str_new(lex_io_buf + lex_io_index, lex_io_total - lex_io_index));
-    lex_io_total = 0;
+    if(str == Qnil) {
+      str = REF(parser_enc_str_new(lex_io_buf + lex_io_index,
+                                   n, parser_state->enc));
+    } else {
+      rb_str_cat(str, lex_io_buf + lex_io_index, n);
+    }
+
+    if(p) {
+      lex_io_index += n;
+      lex_io_count += n;
+      return str;
+    } else {
+      lex_io_total = 0;
+      lex_io_index = 0;
+    }
   }
 
   return Qnil;
@@ -3270,7 +3297,6 @@ static VALUE parse_io_gets(rb_parser_state* parser_state, VALUE s) {
 VALUE
 file_to_ast(VALUE ptp, const char *f, int fd, int start)
 {
-  int n;
   VALUE ret;
   rb_parser_state* parser_state = parser_alloc_state();
 
@@ -3282,7 +3308,7 @@ file_to_ast(VALUE ptp, const char *f, int fd, int start)
   rb_funcall(ptp, rb_intern("references="), 1, references);
   ruby_sourceline = start - 1;
 
-  n = yycompile(parser_state, (char*)f, start);
+  yycompile(parser_state, (char*)f, start);
 
   if(!parse_error) {
     ret = process_parse_tree(parser_state, ptp, top_node, NULL);
@@ -3318,16 +3344,16 @@ enum string_type {
 };
 
 static VALUE
-parser_str_new(const char *p, long n, rb_encoding *enc, int func, rb_encoding *enc0)
+parser_str_new(rb_parser_state* parser_state, const char *p, long n,
+               rb_encoding *enc, int func, rb_encoding *enc0)
 {
   VALUE str;
-
-  str = rb_enc_str_new(p, n, enc);
-  if(!(func & STR_FUNC_REGEXP) && rb_enc_asciicompat(enc)) {
-    if(rb_enc_str_coderange(str) == ENC_CODERANGE_7BIT) {
+  str = REF(parser_enc_str_new(p, n, enc));
+  if(!(func & STR_FUNC_REGEXP) && parser_enc_asciicompat(enc)) {
+    if(parser_enc_str_coderange(str) == ENC_CODERANGE_7BIT) {
       // Do nothing.
-    } else if(enc0 == rb_usascii_encoding() && enc != rb_utf8_encoding()) {
-      rb_enc_associate(str, rb_ascii8bit_encoding());
+    } else if(enc0 == parser_usascii_encoding() && enc != parser_utf8_encoding()) {
+      parser_enc_associate(str, parser_ascii8bit_encoding());
     }
   }
 
@@ -3335,6 +3361,7 @@ parser_str_new(const char *p, long n, rb_encoding *enc, int func, rb_encoding *e
 }
 
 #define lex_goto_eol(parser_state)  (lex_p = lex_pend)
+#define lex_eol_p() (lex_p >= lex_pend)
 #define peek(c) (lex_p < lex_pend && (c) == *lex_p)
 
 static inline int
@@ -3623,8 +3650,8 @@ parser_read_escape(rb_parser_state *parser_state, int flags, rb_encoding **encp)
 static void
 parser_tokaddmbc(rb_parser_state* parser_state, int c, rb_encoding *enc)
 {
-  int len = rb_enc_codelen(c, enc);
-  rb_enc_mbcput(c, tokspace(len), enc);
+  int len = parser_enc_codelen(c, enc);
+  parser_enc_mbcput(c, tokspace(len), enc);
 }
 
 static int
@@ -3705,10 +3732,11 @@ eof:
 static int
 parser_regx_options(rb_parser_state* parser_state)
 {
-    char kcode = 0;
+    int kcode = 0;
     int options = 0;
     int c;
 
+    /* TODO */
     newtok();
     while(c = nextc(), ISALPHA(c)) {
       switch(c) {
@@ -3731,16 +3759,16 @@ parser_regx_options(rb_parser_state* parser_state)
         options |= RE_OPTION_DONT_CAPTURE_GROUP;
         break;
       case 'n':
-        kcode = 16;
+        kcode = RE_KCODE_NONE;
         break;
       case 'e':
-        kcode = 32;
+        kcode = RE_KCODE_EUC;
         break;
       case 's':
-        kcode = 48;
+        kcode = RE_KCODE_SJIS;
         break;
       case 'u':
-        kcode = 64;
+        kcode = RE_KCODE_UTF8;
         break;
       default:
         tokadd((char)c);
@@ -3784,10 +3812,10 @@ parser_tokadd_string(rb_parser_state *parser_state,
 
 #define mixed_error(enc1, enc2) if(!errbuf) {	\
     size_t len = sizeof(mixed_msg) - 4;	\
-    len += strlen(rb_enc_name(enc1));	\
-    len += strlen(rb_enc_name(enc2));	\
+    len += strlen(parser_enc_name(enc1));	\
+    len += strlen(parser_enc_name(enc2));	\
     errbuf = ALLOCA_N(char, len);		\
-    snprintf(errbuf, len, mixed_msg, rb_enc_name(enc1), rb_enc_name(enc2));		\
+    snprintf(errbuf, len, mixed_msg, parser_enc_name(enc1), parser_enc_name(enc2));		\
     yy_error(errbuf);			\
   }
 
@@ -4201,17 +4229,252 @@ parser_lvar_defined(rb_parser_state* parser_state, ID id) {
   return local_id(id);
 }
 
-static char*
-parse_comment(rb_parser_state* parser_state) {
-  ssize_t len = lex_pend - lex_p;
+static long
+parser_encode_length(rb_parser_state* parser_state, const char *name, long len)
+{
+  long nlen;
 
-  char* str = lex_p;
-  while(len-- > 0 && ISSPACE(str[0])) str++;
-  if(len <= 2) return NULL;
+  if(len > 5 && name[nlen = len - 5] == '-') {
+    if(strncasecmp(name + nlen + 1, "unix", 4) == 0)
+      return nlen;
+  }
+  if(len > 4 && name[nlen = len - 4] == '-') {
+    if(strncasecmp(name + nlen + 1, "dos", 3) == 0)
+      return nlen;
+    if(strncasecmp(name + nlen + 1, "mac", 3) == 0 &&
+        !(len == 8 && strncasecmp(name, "utf8-mac", len) == 0))
+      /* exclude UTF8-MAC because the encoding named "UTF8" doesn't exist in Ruby */
+      return nlen;
+  }
+  return len;
+}
 
-  if(str[0] == '-' && str[1] == '*' && str[2] == '-') return str;
+static void
+parser_set_encode(rb_parser_state* parser_state, const char *name)
+{
+  int idx = parser_enc_find_index(name);
+  rb_encoding *enc;
 
-  return NULL;
+  if(idx < 0) {
+    // TODO: handle this in a way that doesn't leak parser state
+    // rb_raise(rb_eArgError, "unknown encoding name: %s", name);
+    return;
+  }
+
+  enc = parser_enc_from_index(idx);
+  if(!parser_enc_asciicompat(enc)) {
+    // TODO: handle this in a way that doesn't leak parser state
+    // rb_raise(rb_eArgError, "%s is not ASCII compatible", parser_enc_name(enc));
+    return;
+  }
+
+  parser_state->enc = enc;
+}
+
+static int
+comment_at_top(rb_parser_state* parser_state)
+{
+  const char *p = lex_pbeg, *pend = lex_p - 1;
+  if(line_count != (has_shebang ? 2 : 1)) return FALSE;
+  while(p < pend) {
+    if (!ISSPACE(*p)) return FALSE;
+    p++;
+  }
+  return TRUE;
+}
+
+typedef long (*rb_magic_comment_length_t)(rb_parser_state* parser_state, const char *name, long len);
+typedef void (*rb_magic_comment_setter_t)(rb_parser_state* parser_state, const char *name, const char *val);
+
+static void
+magic_comment_encoding(rb_parser_state* parser_state, const char *name, const char *val)
+{
+  if(!comment_at_top(parser_state)) {
+    return;
+  }
+  parser_set_encode(parser_state, val);
+}
+
+struct magic_comment {
+    const char *name;
+    rb_magic_comment_setter_t func;
+    rb_magic_comment_length_t length;
+};
+
+static const struct magic_comment magic_comments[] = {
+    {"coding", magic_comment_encoding, parser_encode_length},
+    {"encoding", magic_comment_encoding, parser_encode_length},
+};
+
+static const char *
+magic_comment_marker(const char *str, long len)
+{
+  long i = 2;
+
+  while(i < len) {
+    switch(str[i]) {
+    case '-':
+      if(str[i-1] == '*' && str[i-2] == '-') {
+        return str + i + 1;
+      }
+      i += 2;
+      break;
+    case '*':
+      if(i + 1 >= len) return 0;
+      if(str[i+1] != '-') {
+        i += 4;
+      } else if(str[i-1] != '-') {
+        i += 2;
+      } else {
+        return str + i + 2;
+      }
+      break;
+    default:
+      i += 3;
+      break;
+    }
+  }
+  return 0;
+}
+
+static int
+parser_magic_comment(rb_parser_state* parser_state, const char *str, long len)
+{
+  VALUE name = 0, val = 0;
+  const char *beg, *end, *vbeg, *vend;
+
+#define str_copy(_s, _p, _n) ((_s) \
+    ? (void)(rb_str_resize((_s), (_n)), \
+    MEMCPY(RSTRING_PTR(_s), (_p), char, (_n)), (_s)) \
+    : (void)((_s) = REF(STR_NEW((_p), (_n)))))
+
+  if(len <= 7) return FALSE;
+  if(!(beg = magic_comment_marker(str, len))) return FALSE;
+  if(!(end = magic_comment_marker(beg, str + len - beg))) return FALSE;
+  str = beg;
+  len = end - beg - 3;
+
+  /* %r"([^\\s\'\":;]+)\\s*:\\s*(\"(?:\\\\.|[^\"])*\"|[^\"\\s;]+)[\\s;]*" */
+  while(len > 0) {
+    const struct magic_comment *p = magic_comments;
+    char *s;
+    int i;
+    long n = 0;
+
+    for(; len > 0 && *str; str++, --len) {
+      switch(*str) {
+      case '\'': case '"': case ':': case ';':
+        continue;
+      }
+      if(!ISSPACE(*str)) break;
+    }
+    for(beg = str; len > 0; str++, --len) {
+      switch(*str) {
+      case '\'': case '"': case ':': case ';':
+        break;
+      default:
+        if(ISSPACE(*str)) break;
+        continue;
+      }
+      break;
+    }
+    for(end = str; len > 0 && ISSPACE(*str); str++, --len) {
+      // nothing
+    }
+    if(!len) break;
+    if(*str != ':') continue;
+
+    do str++; while(--len > 0 && ISSPACE(*str));
+    if(!len) break;
+    if(*str == '"') {
+      for(vbeg = ++str; --len > 0 && *str != '"'; str++) {
+        if(*str == '\\') {
+          --len;
+          ++str;
+        }
+      }
+      vend = str;
+      if(len) {
+        --len;
+        ++str;
+      }
+    } else {
+      for(vbeg = str;
+          len > 0 && *str != '"' && *str != ';' && !ISSPACE(*str);
+          --len, str++) {
+        // nothing
+      }
+      vend = str;
+    }
+    while(len > 0 && (*str == ';' || ISSPACE(*str))) --len, str++;
+
+    n = end - beg;
+    str_copy(name, beg, n);
+    s = RSTRING_PTR(name);
+    for(i = 0; i < n; ++i) {
+      if(s[i] == '-') s[i] = '_';
+    }
+    do {
+      if(strncasecmp(p->name, s, n) == 0) {
+        n = vend - vbeg;
+        if(p->length) {
+          n = (*p->length)(parser_state, vbeg, n);
+        }
+        str_copy(val, vbeg, n);
+        (*p->func)(parser_state, s, RSTRING_PTR(val));
+        break;
+      }
+    } while(++p < magic_comments + numberof(magic_comments));
+  }
+
+  return TRUE;
+}
+
+static void
+set_file_encoding(rb_parser_state* parser_state, const char *str, const char *send)
+{
+  int sep = 0;
+  const char *beg = str;
+  VALUE s;
+
+  for(;;) {
+    if(send - str <= 6) return;
+    switch(str[6]) {
+    case 'C': case 'c': str += 6; continue;
+    case 'O': case 'o': str += 5; continue;
+    case 'D': case 'd': str += 4; continue;
+    case 'I': case 'i': str += 3; continue;
+    case 'N': case 'n': str += 2; continue;
+    case 'G': case 'g': str += 1; continue;
+    case '=': case ':':
+      sep = 1;
+      str += 6;
+      break;
+    default:
+      str += 6;
+      if(ISSPACE(*str)) break;
+      continue;
+    }
+    if(strncasecmp(str-6, "coding", 6) == 0) break;
+  }
+
+  for(;;) {
+    do {
+      if(++str >= send) return;
+    } while(ISSPACE(*str));
+    if(sep) break;
+    if(*str != '=' && *str != ':') return;
+    sep = 1;
+    str++;
+  }
+
+  beg = str;
+  while((*str == '-' || *str == '_' || ISALNUM(*str)) && ++str < send) {
+    // nothing
+  }
+  s = REF(rb_str_new(beg, parser_encode_length(parser_state, beg, str - beg)));
+  parser_set_encode(parser_state, RSTRING_PTR(s));
+  rb_str_resize(s, 0);
 }
 
 static void
@@ -4220,13 +4483,13 @@ parser_prepare(rb_parser_state* parser_state)
   int c = nextc();
   switch(c) {
   case '#':
-    if(peek('!')) parser_state->has_shebang = 1;
+    if(peek('!')) has_shebang = 1;
     break;
   case 0xef:		/* UTF-8 BOM marker */
     if(lex_pend - lex_p >= 2 &&
         (unsigned char)lex_p[0] == 0xbb &&
         (unsigned char)lex_p[1] == 0xbf) {
-      parser_state->enc = rb_utf8_encoding();
+      parser_state->enc = parser_utf8_encoding();
       lex_p += 2;
       lex_pbeg = lex_p;
       return;
@@ -4236,7 +4499,7 @@ parser_prepare(rb_parser_state* parser_state)
     return;
   }
   pushback(c);
-  parser_state->enc = rb_enc_get(lex_lastline);
+  parser_state->enc = parser_enc_get(lex_lastline);
 }
 
 #define IS_ARG()        (lex_state == EXPR_ARG \
@@ -4306,10 +4569,13 @@ retry:
     goto retry;
 
   case '#':         /* it's a comment */
-    // TODO: encoding magic comments
-    if(char* str = parse_comment(parser_state)) {
-        ssize_t len = lex_pend - str - 1; // - 1 for the \n
+    /* no magic_comment in shebang line */
+    if(!parser_magic_comment(parser_state, lex_p, lex_pend - lex_p)) {
+      if(comment_at_top(parser_state)) {
+        set_file_encoding(parser_state, lex_p, lex_pend);
+      }
     }
+
     lex_p = lex_pend;
     /* fall through */
   case '\n':
@@ -4408,7 +4674,7 @@ retry:
     if(was_bol()) {
       /* skip embedded rd document */
       if(strncmp(lex_p, "begin", 5) == 0 && ISSPACE(lex_p[5])) {
-        for (;;) {
+        for(;;) {
           lex_goto_eol(parser_state);
           c = nextc();
           if(c == -1) {
@@ -4540,7 +4806,7 @@ retry:
       rb_compile_error(parser_state, "incomplete character syntax");
       return 0;
     }
-    if(rb_enc_isspace(c, parser_state->enc)) {
+    if(parser_enc_isspace(c, parser_state->enc)) {
       if(!IS_ARG()){
         int c2 = 0;
         switch(c) {
@@ -4577,7 +4843,7 @@ retry:
     enc = parser_state->enc;
     if(!parser_isascii()) {
       if(tokadd_mbchar(c) == -1) return 0;
-    } else if((rb_enc_isalnum(c, parser_state->enc) || c == '_') &&
+    } else if((parser_enc_isalnum(c, parser_state->enc) || c == '_') &&
               lex_p < lex_pend && is_identchar(lex_p, lex_pend, parser_state->enc)) {
       goto ternary;
     } else if(c == '\\') {
@@ -4589,6 +4855,9 @@ retry:
         } else {
           tokadd(c);
         }
+      } else if(!lex_eol_p() && !(c = *lex_p, ISASCII(c))) {
+        nextc();
+        if(tokadd_mbchar(c) == -1) return 0;
       } else {
         c = read_escape(0, &enc);
         tokadd(c);
@@ -5147,7 +5416,7 @@ retry:
         c = 'Q';
       } else {
         term = nextc();
-        if(rb_enc_isalnum((int)term, parser_state->enc) || !parser_isascii()) {
+        if(parser_enc_isalnum((int)term, parser_state->enc) || !parser_isascii()) {
           yy_error("unknown type of % string");
           return 0;
         }
@@ -5570,7 +5839,7 @@ rb_compile_warn(const char *file, int line, const char *fmt, ...)
   char buf[BUFSIZ];
   va_list args;
 
-  if (NIL_P(ruby_verbose)) return;
+  if(NIL_P(ruby_verbose)) return;
 
   snprintf(buf, BUFSIZ, "warning: %s", fmt);
 
@@ -5706,13 +5975,13 @@ list_concat(NODE *head, NODE *tail)
 }
 
 static int
-literal_concat0(rb_parser_state* parser_state, VALUE head, VALUE tail)
+parser_literal_concat0(rb_parser_state* parser_state, VALUE head, VALUE tail)
 {
   if(NIL_P(tail)) return 1;
-  if(!rb_enc_compatible(head, tail)) {
+  if(!parser_enc_compatible(head, tail)) {
     rb_compile_error(parser_state, "string literal encodings differ (%s / %s)",
-    rb_enc_name(rb_enc_get(head)),
-    rb_enc_name(rb_enc_get(tail)));
+    parser_enc_name(parser_enc_get(head)),
+    parser_enc_name(parser_enc_get(tail)));
     rb_str_resize(head, 0);
     rb_str_resize(tail, 0);
     return 0;
@@ -5738,7 +6007,7 @@ parser_literal_concat(rb_parser_state* parser_state, NODE *head, NODE *tail)
   switch(nd_type(tail)) {
   case NODE_STR:
     if(htype == NODE_STR) {
-      if(!literal_concat0(parser_state, head->nd_lit, tail->nd_lit)) {
+      if(!literal_concat0(head->nd_lit, tail->nd_lit)) {
       error:
         return 0;
       }
@@ -5749,7 +6018,7 @@ parser_literal_concat(rb_parser_state* parser_state, NODE *head, NODE *tail)
 
   case NODE_DSTR:
     if(htype == NODE_STR) {
-      if(!literal_concat0(parser_state, head->nd_lit, tail->nd_lit))
+      if(!literal_concat0(head->nd_lit, tail->nd_lit))
         goto error;
       tail->nd_lit = head->nd_lit;
       head = tail;
@@ -5909,7 +6178,7 @@ parser_gettable(rb_parser_state* parser_state, ID id)
   } else if(id == keyword__LINE__) {
     return NEW_NUMBER(INT2FIX(ruby_sourceline));
   } else if(id == keyword__ENCODING__) {
-    return NEW_NIL(); // HACK this is a stub, replace this
+    return NEW_ENCODING(STR_NEW2(parser_enc_name(parser_state->enc)));
   } else if(is_local_id(id)) {
     if((in_block() && bv_defined(id)) || local_id(id)) {
       return NEW_LVAR(id);
@@ -6739,12 +7008,12 @@ parser_intern3(const char* name, long len, rb_encoding* enc)
   ID id = (SYM2ID(sym) << ID_SCOPE_SHIFT) & ~ID_INTERNAL;
 
   last = len-1;
-  switch (*m) {
+  switch(*m) {
   case '$':
     id |= ID_GLOBAL;
     break;
   case '@':
-    if (m[1] == '@') {
+    if(m[1] == '@') {
       m++;
       id |= ID_CLASS;
     } else {
@@ -6754,18 +7023,18 @@ parser_intern3(const char* name, long len, rb_encoding* enc)
     break;
   default:
     c = m[0];
-    if (len > 1 && c != '_' && rb_enc_isascii(c, enc) && rb_enc_ispunct(c, enc)) {
+    if(len > 1 && c != '_' && parser_enc_isascii(c, enc) && parser_enc_ispunct(c, enc)) {
       /* operators */
-      for (int i = 0; i < op_tbl_count; i++) {
-        if (*op_tbl[i].name == *m && strcmp(op_tbl[i].name, m) == 0) {
+      for(int i = 0; i < op_tbl_count; i++) {
+        if(*op_tbl[i].name == *m && strcmp(op_tbl[i].name, m) == 0) {
           return id;
         }
       }
     }
 
-    if (m[last] == '=') {
+    if(m[last] == '=') {
       id |= ID_ATTRSET;
-    } else if (rb_enc_isupper(m[0], enc)) {
+    } else if(parser_enc_isupper(m[0], enc)) {
       id |= ID_CONST;
     } else {
       id |= ID_LOCAL;
@@ -6779,7 +7048,7 @@ parser_intern3(const char* name, long len, rb_encoding* enc)
 ID
 parser_intern2(const char* name, long len)
 {
-  return parser_intern3(name, len, rb_usascii_encoding());
+  return parser_intern3(name, len, parser_usascii_encoding());
 }
 
 ID

@@ -13,9 +13,8 @@
 #ifndef MEL_NODE18_HPP
 #define MEL_NODE18_HPP
 
-#include "ruby.h"
-
 #include "bstrlib.h"
+#include "melbourne.hpp"
 #include "quark.hpp"
 
 namespace melbourne {
@@ -183,7 +182,7 @@ namespace melbourne {
 #define NEW_CVDECL(v,val)       NEW_NODE(NODE_CVDECL,v,val,0)
 #define NEW_OP_ASGN1(p,id,a)    NEW_NODE(NODE_OP_ASGN1,p,id,a)
 #define NEW_OP_ASGN2(r,i,o,val) NEW_NODE(NODE_OP_ASGN2,r,val,NEW_OP_ASGN22(i,o))
-#define NEW_OP_ASGN22(i,o)      NEW_NODE(NODE_OP_ASGN2,i,o,rb_id_attrset(i))
+#define NEW_OP_ASGN22(i,o)      NEW_NODE(NODE_OP_ASGN2,i,o,rb_id_attrset((rb_parser_state*) parser_state, i))
 #define NEW_OP_ASGN_OR(i,val)   NEW_NODE(NODE_OP_ASGN_OR,i,val,0)
 #define NEW_OP_ASGN_AND(i,val)  NEW_NODE(NODE_OP_ASGN_AND,i,val,0)
 #define NEW_GVAR(v)             NEW_NODE(NODE_GVAR,v,0,0)
@@ -235,7 +234,7 @@ namespace melbourne {
 #define NEW_FALSE()             NEW_NODE(NODE_FALSE,0,0,0)
 #define NEW_DEFINED(e)          NEW_NODE(NODE_DEFINED,e,0,0)
 #define NEW_NEWLINE(n)          NEW_NODE(NODE_NEWLINE,0,0,n)
-#define NEW_PREEXE(b)           NEW_SCOPE(b)
+#define NEW_PREEXE(b)           NEW_NODE(NODE_PREEXE,0,0,0)
 #define NEW_POSTEXE()           NEW_NODE(NODE_POSTEXE,0,0,0)
 #define NEW_DMETHOD(b)          NEW_NODE(NODE_DMETHOD,0,0,b)
 #define NEW_BMETHOD(b)          NEW_NODE(NODE_BMETHOD,0,0,b)

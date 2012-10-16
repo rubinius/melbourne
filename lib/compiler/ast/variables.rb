@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class BackRef < Node
@@ -24,40 +26,6 @@ module Rubinius
         mode
       end
 
-      def bytecode(g)
-        pos(g)
-        g.last_match mode, 0
-      end
-
-      def defined(g)
-        if @kind == :~
-          g.push_literal "global-variable"
-          g.string_dup
-          return
-        end
-
-        f = g.new_label
-        done = g.new_label
-
-        g.last_match mode, 0
-        g.is_nil
-        g.git f
-
-        if Rubinius.ruby19?
-          g.push_literal "global-variable"
-        else
-          g.push_literal "$#{@kind}"
-        end
-        g.string_dup
-
-        g.goto done
-
-        f.set!
-        g.push :nil
-
-        done.set!
-      end
-
       def to_sexp
         [:back_ref, @kind]
       end
@@ -73,37 +41,6 @@ module Rubinius
 
       Mode = 5
 
-      def bytecode(g)
-        pos(g)
-
-        # These are for $1, $2, etc. We subtract 1 because
-        # we start numbering the captures from 0.
-        g.last_match Mode, @which - 1
-      end
-
-      def defined(g)
-        f = g.new_label
-        done = g.new_label
-
-        g.last_match Mode, @which - 1
-        g.is_nil
-        g.git f
-
-        if Rubinius.ruby19?
-          g.push_literal "global-variable"
-        else
-          g.push_literal "$#{@which}"
-        end
-        g.string_dup
-
-        g.goto done
-
-        f.set!
-        g.push :nil
-
-        done.set!
-      end
-
       def to_sexp
         [:nth_ref, @which]
       end
@@ -115,11 +52,6 @@ module Rubinius
       def initialize(line, name)
         @line = line
         @name = name
-      end
-
-      def value_defined(g, f)
-        variable_defined(g, f)
-        bytecode(g)
       end
     end
 
@@ -144,91 +76,12 @@ module Rubinius
     end
 
     class ClassVariableAccess < VariableAccess
-      def or_bytecode(g)
-        pos(g)
-
-        done =     g.new_label
-        notfound = g.new_label
-
-        variable_defined(g, notfound)
-
-        # Ok, we know the value exists, get it.
-        bytecode(g)
-        g.dup
-        g.git done
-        g.pop
-
-        # yield to generate the code for when it's not found
-        notfound.set!
-        yield
-
-        done.set!
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        push_scope(g)
-        g.send :class_variable_get, 1
-      end
-
-      def push_scope(g)
-        if g.state.scope.module?
-          g.push :self
-        else
-          g.push_scope
-        end
-        g.push_literal @name
-      end
-
-      def variable_defined(g, f)
-        push_scope(g)
-        g.send :class_variable_defined?, 1
-        g.gif f
-      end
-
-      def defined(g)
-        f = g.new_label
-        done = g.new_label
-
-        variable_defined(g, f)
-        g.push_literal "class variable"
-        g.goto done
-
-        f.set!
-        g.push :nil
-
-        done.set!
-      end
-
       def to_sexp
         [:cvar, @name]
       end
     end
 
     class ClassVariableAssignment < VariableAssignment
-      def bytecode(g)
-        pos(g)
-
-        if g.state.scope.module?
-          g.push :self
-        else
-          g.push_scope
-        end
-
-        if @value
-          g.push_literal @name
-          @value.bytecode(g)
-        else
-          g.swap
-          g.push_literal @name
-          g.swap
-        end
-
-        pos(g)
-        g.send :class_variable_set, 2
-      end
-
       def sexp_name
         :cvasgn
       end
@@ -241,15 +94,6 @@ module Rubinius
     end
 
     class CurrentException < Node
-      def bytecode(g)
-        pos(g)
-        g.push_current_exception
-      end
-
-      def defined(g)
-        g.push_literal "global-variable"
-      end
-
       def to_sexp
         [:gvar, :$!]
       end
@@ -279,75 +123,12 @@ module Rubinius
         end
       end
 
-      def bytecode(g)
-        pos(g)
-
-        g.push_rubinius
-        g.find_const :Globals
-        g.push_literal @name
-        g.send :[], 1
-      end
-
-      def variable_defined(g, f)
-        g.push_rubinius
-        g.find_const :Globals
-        g.push_literal @name
-        g.send :key?, 1
-        g.gif f
-      end
-
-      def defined(g)
-        f = g.new_label
-        done = g.new_label
-
-        variable_defined(g, f)
-        g.push_literal "global-variable"
-        g.goto done
-
-        f.set!
-        g.push :nil
-
-        done.set!
-      end
-
       def to_sexp
         [:gvar, @name]
       end
     end
 
     class GlobalVariableAssignment < VariableAssignment
-      def bytecode(g)
-        # @value can be nil if this is coming via an masgn, which means
-        # the value is already on the stack.
-        if @name == :$!
-          g.push_self
-          @value.bytecode(g) if @value
-          pos(g)
-          g.send :raise, 1, true
-        elsif @name == :$~
-          pos(g)
-          # this is a noop for now, but we need to run the
-          # value anyway because it might have side-effects
-          @value.bytecode(g) if @value
-          g.pop
-          g.push :nil
-        else
-          pos(g)
-          g.push_rubinius
-          g.find_const :Globals
-          if @value
-            g.push_literal @name
-            @value.bytecode(g)
-          else
-            g.swap
-            g.push_literal @name
-            g.swap
-          end
-          pos(g)
-          g.send :[]=, 2
-        end
-      end
-
       def sexp_name
         :gasgn
       end
@@ -359,13 +140,6 @@ module Rubinius
       def initialize(line, value)
         @line = line
         @value = value
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        g.cast_array
-        @value.bytecode(g)
       end
 
       def to_sexp
@@ -380,37 +154,12 @@ module Rubinius
         @size = size
       end
 
-      def bytecode(g)
-        pos(g)
-
-        g.make_array @size
-
-        @value.bytecode(g)
-      end
-
       def to_sexp
         [:splat, @value.to_sexp]
       end
     end
 
     class SplatWrapped < SplatAssignment
-      def bytecode(g)
-        pos(g)
-
-        assign = g.new_label
-
-        g.dup
-        g.push_cpath_top
-        g.find_const :Array
-        g.swap
-        g.kind_of
-        g.git assign
-        g.make_array 1
-
-        assign.set!
-        @value.bytecode(g)
-      end
-
       def to_sexp
         [:splat, @value.to_sexp]
       end
@@ -422,60 +171,18 @@ module Rubinius
         @size = size
       end
 
-      def bytecode(g)
-        return if @size == 0
-
-        pos(g)
-
-        g.make_array @size
-      end
-
       def to_sexp
         [:splat]
       end
     end
 
     class InstanceVariableAccess < VariableAccess
-      def bytecode(g)
-        pos(g)
-
-        g.push_ivar @name
-      end
-
-      def variable_defined(g, f)
-        g.push :self
-        g.push_literal @name
-        g.send :__instance_variable_defined_p__, 1
-        g.gif f
-      end
-
-      def defined(g)
-        f = g.new_label
-        done = g.new_label
-
-        variable_defined(g, f)
-        g.push_literal "instance-variable"
-        g.goto done
-
-        f.set!
-        g.push :nil
-
-        done.set!
-      end
-
       def to_sexp
         [:ivar, @name]
       end
     end
 
     class InstanceVariableAssignment < VariableAssignment
-      def bytecode(g)
-        @value.bytecode(g) if @value
-
-        pos(g)
-        g.set_ivar @name
-      end
-
       def sexp_name
         :iasgn
       end
@@ -488,23 +195,6 @@ module Rubinius
         @line = line
         @name = name
         @variable = nil
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        unless @variable
-          g.state.scope.assign_local_reference self
-        end
-        @variable.get_bytecode(g)
-      end
-
-      def defined(g)
-        g.push_literal "local-variable"
-      end
-
-      def value_defined(g, f)
-        bytecode(g)
       end
 
       def to_sexp
@@ -520,22 +210,6 @@ module Rubinius
         @name = name
         @value = value
         @variable = nil
-      end
-
-      def bytecode(g)
-        unless @variable
-          g.state.scope.assign_local_reference self
-        end
-
-        if @value
-          @value.bytecode(g)
-        end
-
-        # Set the position after the value, so the position
-        # reflects where the assignment itself is done
-        pos(g)
-
-        @variable.set_bytecode(g)
       end
 
       def sexp_name
@@ -651,83 +325,6 @@ module Rubinius
         end
       end
 
-      def bytecode(g, array_on_stack=false)
-        unless array_on_stack
-          g.cast_array unless @right or (@splat and not @left)
-        end
-
-        declare_local_scope(g.state.scope)
-
-        if @fixed
-          pad_short(g) if @left and !@splat
-          @right.body.each { |x| x.bytecode(g) }
-          pad_short(g) if @left and @splat
-
-          if @left
-            make_array(g) if @splat
-            rotate(g)
-
-            g.state.push_masgn
-            @left.body.each do |x|
-              x.bytecode(g)
-              g.pop
-            end
-            g.state.pop_masgn
-
-            pop_excess(g) unless @splat
-          end
-        else
-          if @right
-            if @right.kind_of? ArrayLiteral and @right.body.size == 1
-              @right.body.first.bytecode(g)
-              g.cast_multi_value
-            else
-              @right.bytecode(g)
-            end
-
-            g.cast_array unless @right.kind_of? ToArray
-          end
-
-          if @left
-            g.state.push_masgn
-            @left.body.each do |x|
-              g.shift_array
-              g.cast_array if x.kind_of? MultipleAssignment and x.left
-              x.bytecode(g)
-              g.pop
-            end
-            g.state.pop_masgn
-          end
-
-          if @post
-            g.state.push_masgn
-            @post.body.each do |x|
-              g.dup
-              g.send :pop, 0
-              g.cast_array if x.kind_of? MultipleAssignment and x.left
-              x.bytecode(g)
-              g.pop
-            end
-            g.state.pop_masgn
-          end
-        end
-
-        if @splat
-          g.state.push_masgn
-          @splat.bytecode(g)
-          g.state.pop_masgn
-        end
-
-        if @right
-          g.pop if !@fixed or @splat
-          g.push :true
-        end
-      end
-
-      def defined(g)
-        g.push_literal "assignment"
-      end
-
       def to_sexp
         left = @left ? @left.to_sexp : [:array]
         left << [:splat, @splat.to_sexp] if @splat
@@ -748,23 +345,6 @@ module Rubinius
         @line = line
         @name = name
         @variable = nil
-      end
-
-      def position_bytecode(g)
-        @variable.get_bytecode(g)
-        g.cast_array
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        unless @variable
-          g.state.scope.assign_local_reference self
-        end
-
-        g.shift_array
-        @variable.set_bytecode(g)
-        g.pop
       end
     end
   end
