@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class Send < Node
@@ -16,82 +18,8 @@ module Rubinius
 
       def check_local_reference(g)
         if @receiver.kind_of? Self and (@check_for_local or g.state.eval?)
-          reference = g.state.scope.search_local(@name)
+          g.state.scope.search_local(@name)
         end
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        if @vcall_style and reference = check_local_reference(g)
-          return reference.get_bytecode(g)
-        end
-
-        @receiver.bytecode(g)
-
-        if @block
-          @block.bytecode(g)
-          g.send_with_block @name, 0, @privately
-        elsif @vcall_style
-          g.send_vcall @name
-        else
-          g.send @name, 0, @privately
-        end
-      end
-
-      def value_defined(g, f)
-        # Save the current exception into a stack local
-        g.push_exception_state
-        outer_exc_state = g.new_stack_local
-        g.set_stack_local outer_exc_state
-        g.pop
-
-        ok = g.new_label
-        ex = g.new_label
-        g.setup_unwind ex, RescueType
-
-        bytecode(g)
-
-        g.pop_unwind
-        g.goto ok
-
-        ex.set!
-        g.clear_exception
-        g.push_stack_local outer_exc_state
-        g.restore_exception_state
-        g.goto f
-
-        ok.set!
-      end
-
-      def defined(g)
-        if @vcall_style and check_local_reference(g)
-          g.push_literal "local-variable"
-          return
-        end
-
-        f = g.new_label
-        done = g.new_label
-
-        @receiver.value_defined(g, f)
-
-        g.push_literal @name
-
-        if @vcall_style
-          g.push :true
-          g.send :__respond_to_p__, 2
-        else
-          g.push_self
-          g.invoke_primitive :vm_check_callable, 3
-        end
-        g.gif f
-        g.push_literal "method"
-        g.goto done
-
-        f.set!
-        g.push :nil
-
-        done.set!
       end
 
       def sexp_name
@@ -132,23 +60,6 @@ module Rubinius
         @arguments = ActualArguments.new line, arguments
       end
 
-      def bytecode(g)
-        @receiver.bytecode(g)
-        @arguments.bytecode(g)
-
-        pos(g)
-
-        if @arguments.splat?
-          @block ? @block.bytecode(g) : g.push(:nil)
-          g.send_with_splat @name, @arguments.size, @privately, false
-        elsif @block
-          @block.bytecode(g)
-          g.send_with_block @name, @arguments.size, @privately
-        else
-          g.send @name, @arguments.size, @privately
-        end
-      end
-
       def arguments_sexp(name=:arglist)
         sexp = [name] + @arguments.to_sexp
         sexp << @block.to_sexp if @block
@@ -166,29 +77,6 @@ module Rubinius
         @name = :"#{name}="
 
         @arguments = ActualArguments.new line, arguments
-      end
-
-      def bytecode(g)
-        @receiver.bytecode(g)
-        if g.state.masgn?
-          g.swap
-          g.send @name, 1, @privately
-        else
-          @arguments.bytecode(g)
-          g.dup
-
-          if @arguments.splat?
-            g.move_down @arguments.size + 2
-            g.swap
-            g.push :nil
-            g.send_with_splat @name, @arguments.size, @privately, true
-          else
-            g.move_down @arguments.size + 1
-            g.send @name, @arguments.size, @privately
-          end
-
-          g.pop
-        end
       end
 
       def sexp_name
@@ -213,37 +101,27 @@ module Rubinius
         end
       end
 
-      def masgn_bytecode(g)
-        @receiver.bytecode(g)
-        g.swap
-        @arguments.masgn_bytecode(g)
-        g.send @name, @arguments.size + 1, @privately
-        # TODO: splat
-      end
-
-      def bytecode(g)
-        return masgn_bytecode(g) if g.state.masgn?
-
-        @receiver.bytecode(g)
-        @arguments.bytecode(g)
-        g.dup
-
-        if @arguments.splat?
-          g.move_down @arguments.size + 2
-          g.swap
-          g.push :nil
-          g.send_with_splat @name, @arguments.size, @privately, true
-        else
-          g.move_down @arguments.size + 1
-          g.send @name, @arguments.size, @privately
-        end
-
-        g.pop
-      end
-
       def sexp_name
         :attrasgn
       end
+    end
+
+    class PreExe < Node
+      attr_accessor :block
+
+      def initialize(line)
+        @line = line
+      end
+
+      def to_sexp
+      end
+
+      def pre_sexp
+        @block.to_sexp.insert 1, :pre_exe
+      end
+    end
+
+    class PreExe19 < PreExe
     end
 
     class PushActualArguments
@@ -258,11 +136,6 @@ module Rubinius
 
       def splat?
         @arguments.kind_of? SplatValue or @arguments.kind_of? ConcatArgs
-      end
-
-      def bytecode(g)
-        @arguments.bytecode(g)
-        @value.bytecode(g)
       end
 
       def to_sexp
@@ -293,17 +166,6 @@ module Rubinius
         nil_block.set!
       end
 
-      def bytecode(g)
-        @body.bytecode(g)
-        convert(g)
-      end
-
-      def assignment_bytecode(g)
-        g.push_block_arg
-        convert(g)
-        @body.bytecode(g)
-      end
-
       def to_sexp
         [:block_pass, @body.to_sexp]
       end
@@ -321,22 +183,13 @@ module Rubinius
     class CollectSplat < Node
       def initialize(line, *parts)
         @line = line
-        @parts = parts
+        @splat = parts.shift
+        @last = parts.pop
+        @array = parts
       end
 
-      def bytecode(g)
-        collect = false
-
-        @parts.each do |x|
-          x.bytecode(g)
-          g.cast_array
-
-          if collect
-            g.send :+, 1
-          else
-            collect = true
-          end
-        end
+      def to_sexp
+        [:collect_splat] + @parts.map { |x| x.to_sexp }
       end
     end
 
@@ -352,9 +205,14 @@ module Rubinius
           @splat = arguments
           @array = []
         when ConcatArgs
-          if arguments.array.kind_of? ArrayLiteral
+          case arguments.array
+          when ArrayLiteral
             @array = arguments.array.body
             @splat = SplatValue.new line, arguments.rest
+          when PushArgs
+            @array = []
+            node = SplatValue.new line, arguments.rest
+            @splat = CollectSplat.new line, arguments.array, node
           else
             @array = []
             @splat = CollectSplat.new line, arguments.array, arguments.rest
@@ -384,21 +242,14 @@ module Rubinius
         @array.size
       end
 
+      def stack_size
+        size = @array.size
+        size += 1 if splat?
+        size
+      end
+
       def splat?
         not @splat.nil?
-      end
-
-      def masgn_bytecode(g)
-        @array.each do |x|
-          x.bytecode(g)
-          g.swap
-        end
-        # TODO: splat
-      end
-
-      def bytecode(g)
-        @array.each { |x| x.bytecode(g) }
-        @splat.bytecode(g) if @splat
       end
 
       def to_sexp
@@ -409,7 +260,7 @@ module Rubinius
     end
 
     class Iter < Node
-      # include Compiler::LocalVariables
+      include Compiler::LocalVariables
 
       attr_accessor :parent, :arguments, :body
 
@@ -478,47 +329,6 @@ module Rubinius
         end
       end
 
-      def bytecode(g)
-        pos(g)
-
-        state = g.state
-        state.scope.nest_scope self
-
-        blk = new_block_generator g, @arguments
-
-        blk.push_state self
-        blk.state.push_super state.super
-        blk.state.push_eval state.eval
-
-        blk.state.push_name blk.name
-
-        # Push line info down.
-        pos(blk)
-
-        @arguments.bytecode(blk)
-
-        blk.state.push_block
-        blk.push_modifiers
-        blk.break = nil
-        blk.next = nil
-        blk.redo = blk.new_label
-        blk.redo.set!
-
-        @body.bytecode(blk)
-
-        blk.pop_modifiers
-        blk.state.pop_block
-        blk.ret
-        blk.close
-        blk.pop_state
-
-        blk.splat_index = @arguments.splat_index
-        blk.local_count = local_count
-        blk.local_names = local_names
-
-        g.create_block blk
-      end
-
       def sexp_name
         :iter
       end
@@ -531,7 +341,7 @@ module Rubinius
     class Iter19 < Iter
       def initialize(line, arguments, body)
         @line = line
-        @arguments = arguments
+        @arguments = arguments || IterArguments.new(line, nil)
         @body = body || NilLiteral.new(line)
 
         if @body.kind_of?(Block) and @body.locals
@@ -561,7 +371,6 @@ module Rubinius
         @block = nil
         @prelude = nil
 
-        array = []
         case arguments
         when Fixnum
           @splat_index = nil
@@ -652,46 +461,6 @@ module Rubinius
         end
       end
 
-      def arguments_bytecode(g, is_array=false)
-        g.state.push_masgn
-
-        if @arguments.kind_of? MultipleAssignment
-          @arguments.bytecode(g, is_array)
-        else
-          @arguments.bytecode(g) if @arguments
-        end
-
-        g.state.pop_masgn
-
-        if @splat
-          @splat_index = @splat.variable.slot
-        end
-      end
-
-      def bytecode(g)
-        case @prelude
-        when :single
-          g.cast_for_single_block_arg
-          arguments_bytecode(g)
-          g.pop
-        when :multi
-          g.cast_for_multi_block_arg
-          arguments_bytecode(g, true)
-          g.pop
-        when :splat
-          g.cast_for_splat_block_arg
-          arguments_bytecode(g)
-          g.pop
-        when :empty
-          g.cast_for_splat_block_arg
-          g.pop
-        end
-
-        if @block
-          @block.assignment_bytecode(g)
-        end
-      end
-
       def to_sexp
         if @arguments
           @arguments.to_sexp
@@ -734,23 +503,53 @@ module Rubinius
       end
     end
 
+    class For19Arguments < Node
+      def initialize(line, arguments)
+        @line = line
+        @arguments = arguments
+
+        if @arguments.kind_of? MultipleAssignment
+          @args = 0
+          @splat = 0
+        else
+          @args = 1
+          @splat = nil
+        end
+      end
+
+      def required_args
+        @args
+      end
+
+      def total_args
+        @args
+      end
+
+      def post_args
+        0
+      end
+
+      def splat_index
+        @splat
+      end
+    end
+
+    class For19 < For
+      def initialize(line, arguments, body)
+        @line = line
+        @arguments = For19Arguments.new line, arguments
+        @body = body || NilLiteral.new(line)
+
+        new_local :"$for_args"
+      end
+    end
+
     class Negate < Node
       attr_accessor :value
 
       def initialize(line, value)
         @line = line
         @value = value
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        if @value.kind_of? NumberLiteral
-          g.push(-@value.value)
-        else
-          @value.bytecode(g)
-          g.send :"-@", 0
-        end
       end
 
       def to_sexp
@@ -766,48 +565,6 @@ module Rubinius
         @block = nil
         @name = nil
         @arguments = ActualArguments.new line, arguments
-      end
-
-      def block_bytecode(g)
-        if @block
-          @block.bytecode(g)
-        else
-          g.push_block
-        end
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        @name = g.state.super.name if g.state.super?
-
-        @arguments.bytecode(g)
-
-        block_bytecode(g)
-
-        if @arguments.splat?
-          g.send_super @name, @arguments.size, true
-        else
-          g.send_super @name, @arguments.size
-        end
-      end
-
-      def defined(g)
-        nope = g.new_label
-        done = g.new_label
-
-        g.invoke_primitive :vm_check_super_callable, 0
-
-        g.gif nope
-
-        g.push_literal "super"
-        g.string_dup
-        g.goto done
-
-        nope.set!
-        g.push :nil
-
-        done.set!
       end
 
       def to_sexp
@@ -839,33 +596,6 @@ module Rubinius
         end
       end
 
-      def bytecode(g)
-        pos(g)
-
-        @arguments.bytecode(g)
-
-        if @yield_splat
-          g.yield_splat @argument_count
-        else
-          g.yield_stack @argument_count
-        end
-      end
-
-      def defined(g)
-        t = g.new_label
-        f = g.new_label
-
-        g.push_block
-        g.git t
-        g.push :nil
-        g.goto f
-
-        t.set!
-        g.push_literal "yield"
-
-        f.set!
-      end
-
       def to_sexp
         arguments_sexp :yield
       end
@@ -875,16 +605,6 @@ module Rubinius
       def initialize(line)
         @line = line
         @block = nil
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        @name = g.state.super.name if g.state.super?
-
-        block_bytecode(g)
-
-        g.zsuper @name
       end
 
       def to_sexp

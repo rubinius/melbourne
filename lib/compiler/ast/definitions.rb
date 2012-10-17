@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class Alias < Node
@@ -9,32 +11,12 @@ module Rubinius
         @from = from
       end
 
-      def bytecode(g)
-        pos(g)
-
-        g.push_scope
-        @to.bytecode(g)
-        @from.bytecode(g)
-        g.send :alias_method, 2, true
-      end
-
       def to_sexp
         [:alias, @to.to_sexp, @from.to_sexp]
       end
     end
 
     class VAlias < Alias
-      def bytecode(g)
-        pos(g)
-
-        g.push_rubinius
-        g.find_const :Globals
-        g.push_literal @from
-        g.push_literal @to
-        # TODO: fix #add_alias arg order to match #alias_method
-        g.send :add_alias, 2
-      end
-
       def to_sexp
         [:valias, @to, @from]
       end
@@ -46,14 +28,6 @@ module Rubinius
       def initialize(line, sym)
         @line = line
         @name = sym
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        g.push_scope
-        @name.bytecode(g)
-        g.send :__undef_method__, 1
       end
 
       def to_sexp
@@ -87,22 +61,13 @@ module Rubinius
         end
       end
 
-      def bytecode(g)
-        count = @array.size - 1
-        @array.each_with_index do |x, i|
-          start_ip = g.ip
-          x.bytecode(g)
-          g.pop unless start_ip == g.ip or i == count
-        end
-      end
-
       def to_sexp
         @array.inject([:block]) { |s, x| s << x.to_sexp }
       end
     end
 
     class ClosedScope < Node
-      # include Compiler::LocalVariables
+      include Compiler::LocalVariables
 
       attr_accessor :body
 
@@ -142,53 +107,6 @@ module Rubinius
         false
       end
 
-      def attach_and_call(g, arg_name, scoped=false, pass_block=false)
-        name = @name || arg_name
-        meth = new_generator(g, name)
-
-        meth.push_state self
-
-        if scoped
-          meth.push_self
-          meth.add_scope
-        end
-
-        meth.state.push_name name
-
-        @body.bytecode meth
-
-        meth.state.pop_name
-
-        meth.ret
-        meth.close
-
-        meth.local_count = local_count
-        meth.local_names = local_names
-
-        meth.pop_state
-
-        g.dup
-        g.push_rubinius
-        g.swap
-        g.push_literal arg_name
-        g.swap
-        g.push_generator meth
-        g.swap
-        g.push_scope
-        g.swap
-        g.send :attach_method, 4
-        g.pop
-
-        if pass_block
-          g.push_block
-          g.send_with_block arg_name, 0
-        else
-          g.send arg_name, 0
-        end
-
-        return meth
-      end
-
       def to_sexp
         sexp = [:scope]
         sexp << @body.to_sexp if @body
@@ -207,43 +125,6 @@ module Rubinius
         @body = block
       end
 
-      def compile_body(g)
-        meth = new_generator(g, @name, @arguments)
-
-        meth.push_state self
-        meth.state.push_super self
-        meth.definition_line(@line)
-
-        meth.state.push_name @name
-
-        @arguments.bytecode(meth)
-        @body.bytecode(meth)
-
-        meth.state.pop_name
-
-        meth.local_count = local_count
-        meth.local_names = local_names
-
-        meth.ret
-        meth.close
-        meth.pop_state
-
-        return meth
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        g.push_rubinius
-        g.push_literal @name
-        g.push_generator compile_body(g)
-        g.push_scope
-        g.push_variables
-        g.send :method_visibility, 0
-
-        g.send :add_defn_method, 4
-      end
-
       def to_sexp
         [:defn, @name, @arguments.to_sexp, [:scope, @body.to_sexp]]
       end
@@ -258,12 +139,6 @@ module Rubinius
         @body = DefineSingletonScope.new line, name, block
       end
 
-      def bytecode(g)
-        pos(g)
-
-        @body.bytecode(g, @receiver)
-      end
-
       def to_sexp
         [:defs, @receiver.to_sexp, @body.name,
           @body.arguments.to_sexp, [:scope, @body.body.to_sexp]]
@@ -275,17 +150,6 @@ module Rubinius
         super line, name, block
       end
 
-      def bytecode(g, recv)
-        pos(g)
-
-        g.push_rubinius
-        g.push_literal @name
-        g.push_generator compile_body(g)
-        g.push_scope
-        recv.bytecode(g)
-
-        g.send :attach_method, 4
-      end
     end
 
     class FormalArguments < Node
@@ -323,13 +187,6 @@ module Rubinius
       def block_arg=(node)
         @names << node.name
         @block_arg = node
-      end
-
-      def bytecode(g)
-        map_arguments g.state.scope
-
-        @defaults.bytecode(g) if @defaults
-        @block_arg.bytecode(g) if @block_arg
       end
 
       def required_args
@@ -485,7 +342,7 @@ module Rubinius
       end
 
       def map_arguments(scope)
-        @required.each.with_index do |arg, index|
+        @required.each_with_index do |arg, index|
           case arg
           when PatternArguments
             arg.map_arguments scope
@@ -501,20 +358,6 @@ module Rubinius
         scope.assign_local_reference @block_arg if @block_arg
       end
 
-      def bytecode(g)
-        map_arguments g.state.scope
-
-        @required.each do |arg|
-          if arg.kind_of? PatternArguments
-            arg.argument.position_bytecode(g)
-            arg.bytecode(g)
-            g.pop
-          end
-        end
-
-        @defaults.bytecode(g) if @defaults
-        @block_arg.bytecode(g) if @block_arg
-      end
     end
 
     class PatternArguments < Node
@@ -556,9 +399,6 @@ module Rubinius
         end
       end
 
-      def bytecode(g)
-        @arguments.body.each { |arg| arg.bytecode(g) }
-      end
     end
 
     class DefaultArguments < Node
@@ -573,19 +413,6 @@ module Rubinius
 
       def map_arguments(scope)
         @arguments.each { |var| scope.assign_local_reference var }
-      end
-
-      def bytecode(g)
-        @arguments.each do |arg|
-          done = g.new_label
-
-          g.passed_arg arg.variable.slot
-          g.git done
-          arg.bytecode(g)
-          g.pop
-
-          done.set!
-        end
       end
 
       def to_sexp
@@ -605,14 +432,6 @@ module Rubinius
       def initialize(line, name)
         @line = line
         @name = name
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        g.push_proc
-        g.set_local @variable.slot
-        g.pop
       end
     end
 
@@ -640,11 +459,6 @@ module Rubinius
         end
       end
 
-      def bytecode(g)
-        @name.bytecode(g)
-        @body.bytecode(g)
-      end
-
       def to_sexp
         superclass = @superclass.kind_of?(NilLiteral) ? nil : @superclass.to_sexp
         [:class, @name.to_sexp, superclass, @body.to_sexp]
@@ -661,12 +475,6 @@ module Rubinius
       def module?
         true
       end
-
-      def bytecode(g)
-        pos(g)
-
-        attach_and_call g, :__class_init__, true
-      end
     end
 
     class ClassName < Node
@@ -676,20 +484,6 @@ module Rubinius
         @line = line
         @name = name
         @superclass = superclass
-      end
-
-      def name_bytecode(g)
-        g.push_rubinius
-        g.push_literal @name
-        @superclass.bytecode(g)
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        name_bytecode(g)
-        g.push_scope
-        g.send :open_class, 3
       end
 
       def to_sexp
@@ -702,14 +496,6 @@ module Rubinius
         @line = line
         @name = node.name
         @superclass = superclass
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        name_bytecode(g)
-        g.push_cpath_top
-        g.send :open_class_under, 3
       end
 
       def to_sexp
@@ -725,14 +511,6 @@ module Rubinius
         @name = node.name
         @parent = node.parent
         @superclass = superclass
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        name_bytecode(g)
-        @parent.bytecode(g)
-        g.send :open_class_under, 3
       end
 
       def to_sexp
@@ -762,22 +540,12 @@ module Rubinius
         end
       end
 
-      def bytecode(g)
-        @name.bytecode(g)
-        @body.bytecode(g)
-      end
-
       def to_sexp
         [:module, @name.to_sexp, @body.to_sexp]
       end
     end
 
     class EmptyBody < Node
-      def bytecode(g)
-        g.pop
-        g.push :nil
-      end
-
       def to_sexp
         [:scope]
       end
@@ -791,19 +559,6 @@ module Rubinius
         @name = name
       end
 
-      def name_bytecode(g)
-        g.push_rubinius
-        g.push_literal @name
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        name_bytecode(g)
-        g.push_scope
-        g.send :open_module, 2
-      end
-
       def to_sexp
         @name
       end
@@ -813,14 +568,6 @@ module Rubinius
       def initialize(line, node)
         @line = line
         @name = node.name
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        name_bytecode(g)
-        g.push_cpath_top
-        g.send :open_module_under, 2
       end
 
       def to_sexp
@@ -835,14 +582,6 @@ module Rubinius
         @line = line
         @name = node.name
         @parent = node.parent
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        name_bytecode(g)
-        @parent.bytecode(g)
-        g.send :open_module_under, 2
       end
 
       def to_sexp
@@ -860,12 +599,6 @@ module Rubinius
       def module?
         true
       end
-
-      def bytecode(g)
-        pos(g)
-
-        attach_and_call g, :__module_init__, true
-      end
     end
 
     class SClass < Node
@@ -875,12 +608,6 @@ module Rubinius
         @line = line
         @receiver = receiver
         @body = SClassScope.new line, body
-      end
-
-      def bytecode(g)
-        pos(g)
-        @receiver.bytecode(g)
-        @body.bytecode(g)
       end
 
       def to_sexp
@@ -894,46 +621,29 @@ module Rubinius
         @body = body
         @name = nil
       end
-
-      def bytecode(g)
-        pos(g)
-
-        g.push_rubinius
-        g.find_const :Type
-        g.swap
-        g.send :object_singleton_class, 1
-
-        if @body
-          # if @body just returns self, don't bother with it.
-          if @body.kind_of? Block
-            ary = @body.array
-            return if ary.size == 1 and ary[0].kind_of? Self
-          end
-
-          # Ok, emit it.
-          attach_and_call g, :__metaclass_init__, true, true
-        else
-          g.pop
-          g.push :nil
-        end
-      end
     end
 
     class Container < ClosedScope
-      attr_accessor :file, :name, :variable_scope
+      attr_accessor :file, :name, :variable_scope, :pre_exe
 
       def initialize(body)
         @body = body || NilLiteral.new(1)
+        @pre_exe = []
       end
 
-      def container_bytecode(g)
-        g.name = @name
-        g.file = @file.to_sym
+      def push_state(g)
+        g.push_state self
+      end
 
-        yield if block_given?
+      def pop_state(g)
+        g.pop_state
+      end
 
-        g.local_count = local_count
-        g.local_names = local_names
+      def to_sexp
+        sexp = [sexp_name]
+        @pre_exe.each { |pe| sexp << pe.pre_sexp }
+        sexp << @body.to_sexp
+        sexp
       end
     end
 
@@ -951,7 +661,7 @@ module Rubinius
         depth = 1
         scope = @variable_scope
         while scope
-          if slot = scope.method.local_slot(name)
+          if !scope.method.for_eval? and slot = scope.method.local_slot(name)
             return Compiler::NestedLocalVariable.new(depth, slot)
           elsif scope.eval_local_defined?(name, false)
             return Compiler::EvalLocalVariable.new(name)
@@ -991,20 +701,13 @@ module Rubinius
         var.variable = reference
       end
 
-      def bytecode(g)
-        super(g)
-
-        container_bytecode(g) do
-          g.push_state self
-          g.state.push_eval self
-          @body.bytecode(g)
-          g.ret
-          g.pop_state
-        end
+      def push_state(g)
+        g.push_state self
+        g.state.push_eval self
       end
 
-      def to_sexp
-        [:eval, @body.to_sexp]
+      def sexp_name
+        :eval
       end
     end
 
@@ -1014,18 +717,8 @@ module Rubinius
         @name = :__snippet__
       end
 
-      def bytecode(g)
-        super(g)
-
-        container_bytecode(g) do
-          g.push_state self
-          @body.bytecode(g)
-          g.pop_state
-        end
-      end
-
-      def to_sexp
-        [:snippet, @body.to_sexp]
+      def sexp_name
+        :snippet
       end
     end
 
@@ -1035,21 +728,8 @@ module Rubinius
         @name = :__script__
       end
 
-      def bytecode(g)
-        super(g)
-
-        container_bytecode(g) do
-          g.push_state self
-          @body.bytecode(g)
-          g.pop
-          g.push :true
-          g.ret
-          g.pop_state
-        end
-      end
-
-      def to_sexp
-        [:script, @body.to_sexp]
+      def sexp_name
+        :script
       end
     end
 
@@ -1059,12 +739,6 @@ module Rubinius
       def initialize(line, expr)
         @line = line
         @expression = expr
-      end
-
-      def bytecode(g)
-        pos(g)
-
-        @expression.defined(g)
       end
 
       def to_sexp

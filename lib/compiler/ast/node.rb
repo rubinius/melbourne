@@ -1,3 +1,5 @@
+# -*- encoding: us-ascii -*-
+
 module Rubinius
   module AST
     class Node
@@ -79,23 +81,6 @@ module Rubinius
         meth
       end
 
-      def bytecode(g)
-      end
-
-      def defined(g)
-        g.push_rubinius
-        g.push_scope
-        g.send :active_path, 0
-        g.push @line
-        g.send :unrecognized_defined, 2
-        g.pop
-        g.push :nil
-      end
-
-      def value_defined(g, f)
-        bytecode(g)
-      end
-
       # This method implements a sort of tree iterator, yielding each Node
       # instance to the provided block with the first argument to #walk. If
       # the block returns a non-true value, the walk is terminated.
@@ -111,18 +96,6 @@ module Rubinius
 
       def ascii_graph
         AsciiGrapher.new(self).print
-      end
-
-      # Called if used as the lhs of an ||=. Expected to yield if the
-      # value was not found, so the bytecode for it to be emitted.
-      def or_bytecode(g)
-        found = g.new_label
-        bytecode(g)
-        g.dup
-        g.git found
-        g.pop
-        yield
-        found.set!
       end
 
       def to_sexp
@@ -161,7 +134,7 @@ module Rubinius
       # The #visit implements a read-only traversal of the tree. To modify the
       # tree, see the #transform methed.
       def visit(visitor, parent=nil)
-        visitor.send self.node_name, self, parent
+        visitor.__send__ self.node_name, self, parent
         children { |c| c.visit visitor, self }
       end
 
@@ -257,12 +230,19 @@ module Rubinius
     class State
       attr_reader :scope, :super, :eval
 
+      class << self
+        attr_accessor :flip_flops
+      end
+
+      self.flip_flops ||= 0
+
       def initialize(scope)
         @scope = scope
         @ensure = 0
         @block = 0
         @masgn = 0
         @loop = 0
+        @op_asgn = 0
         @rescue = []
         @name = []
       end
@@ -315,6 +295,14 @@ module Rubinius
         @block > 0
       end
 
+      def flip_flops
+        State.flip_flops
+      end
+
+      def push_flip_flop
+        State.flip_flops += 1
+      end
+
       def push_masgn
         @masgn += 1
       end
@@ -325,6 +313,18 @@ module Rubinius
 
       def masgn?
         @masgn > 0
+      end
+
+      def push_op_asgn
+        @op_asgn += 1
+      end
+
+      def pop_op_asgn
+        @op_asgn -= 1 if op_asgn?
+      end
+
+      def op_asgn?
+        @op_asgn > 0
       end
 
       def push_super(scope)

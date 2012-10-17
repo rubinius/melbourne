@@ -29,13 +29,25 @@ module Rubinius
     attr_accessor :transforms
     attr_accessor :magic_handler
     attr_accessor :references
+    attr_reader   :pre_exe
 
     def self.parse_string(string, name="(eval)", line=1)
-      new(name, line).parse_string string
+      system_parser.new(name, line).parse_string string
     end
 
     def self.parse_file(name, line=1)
-      new(name, line).parse_file
+      system_parser.new(name, line).parse_file
+    end
+
+    def self.system_parser
+      case RUBY_VERSION
+      when /1\.8/
+        Melbourne
+      when /1\.9/
+        Melbourne19
+      else
+        raise Exception, "No parser configured for Ruby version #{RUBY_VERSION}."
+      end
     end
 
     def initialize(name, line, transforms=[])
@@ -44,12 +56,17 @@ module Rubinius
       @transforms = transforms
       @magic_handler = nil
       @data_offset = nil
+      @pre_exe = []
 
       # There can be multiple reported, we need to track them all.
       @syntax_errors = []
     end
 
     attr_reader :syntax_errors
+
+    def add_pre_exe(node)
+      @pre_exe << node if node
+    end
 
     def add_magic_comment(str)
       if @magic_handler
@@ -101,8 +118,5 @@ module Rubinius
   class Melbourne19 < Melbourne
     alias_method :file_to_ast, :file_to_ast_19
     alias_method :string_to_ast, :string_to_ast_19
-  end
-
-  class Melbourne20 < Melbourne19
   end
 end
